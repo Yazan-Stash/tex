@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+directory="$(pwd -P)"
+directory_name="$(basename -- "$directory")"
+session="${directory_name//[^[:alnum:]_-]/_}"
+
+if ! command -v tmux >/dev/null 2>&1; then
+    echo "tex: tmux is required." >&2
+    exit 1
+fi
+
+case "${1:-}" in
+    stop)
+        if tmux kill-session -t "$session" 2>/dev/null; then
+            echo "Session '$session' stopped."
+        else
+            echo "No session '$session' running."
+        fi
+
+        exit 0
+        ;;
+    "")
+        ;;
+    *)
+        echo "Usage: tex [stop]" >&2
+        exit 1
+        ;;
+esac
+
+if tmux has-session -t "$session" 2>/dev/null; then
+    echo "Attaching to existing session '$session'..."
+    exec tmux attach-session -t "$session"
+fi
+
+required_commands=(vim opencode)
+is_git_repository=false
+is_laravel_project=false
+has_pail=false
+has_horizon=false
+
+if command -v git >/dev/null 2>&1 && git -C "$directory" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    is_git_repository=true
+    required_commands+=(lazygit)
+fi
+
+composer_has_package() {
+    local package="$1"
+
+    php -r '$composer = json_decode(file_get_contents($argv[1]), true); exit(isset($composer["require"][$argv[2]]) || isset($composer["require-dev"][$argv[2]]) ? 0 : 1);' "$directory/composer.json" "$package"
+}
+
+if [[ -f "$directory/artisan" ]]; then
+    is_laravel_project=true
+    required_commands+=(php)
+
+    if command -v php >/dev/null 2>&1 && [[ -f "$directory/composer.json" ]] && composer_has_package "laravel/pail"; then
+        has_pail=true
+    else
+        required_commands+=(tail)
+    fi
+
+    if command -v php >/dev/null 2>&1 && [[ -f "$directory/composer.json" ]] && composer_has_package "laravel/horizon"; then
+        has_horizon=true
+    fi
+fi
+
+for command_name in "${required_commands[@]}"; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        echo "tex: $command_name is required." >&2
+        exit 1
+    fi
+done
+
+session_created=false
+
+cleanup_session() {
+    if [[ "$session_created" == true ]]; then
+        tmux kill-session -t "$session" 2>/dev/null || true
+    fi
+}
+
+trap cleanup_session ERR
+
+tmux new-session -d -s "$session" -n "editor" -c "$directory"
+session_created=true
+tmux send-keys -t "$session:editor" "vim ." Enter
+
+tmux new-window -t "$session" -n "opencode" -c "$directory"
+tmux send-keys -t "$session:opencode" "opencode" Enter
+
+tmux new-window -t "$session" -n "terminal" -c "$directory"
+
+if [[ "$is_git_repository" == true ]]; then
+    tmux new-window -t "$session" -n "lazygit" -c "$directory"
+    tmux send-keys -t "$session:lazygit" "lazygit" Enter
+fi
+
+if [[ "$is_laravel_project" == true ]]; then
+    tmux new-window -t "$session" -n "logs" -c "$directory"
+
+    if [[ "$has_pail" == true ]]; then
+        tmux send-keys -t "$session:logs" "php artisan pail" Enter
+    else
+        tmux send-keys -t "$session:logs" "tail -f storage/logs/laravel.log" Enter
+    fi
+
+    if [[ "$has_horizon" == true ]]; then
+        tmux new-window -t "$session" -n "horizon" -c "$directory"
+        tmux send-keys -t "$session:horizon" "php artisan horizon" Enter
+    fi
+fi
+
+tmux select-window -t "$session:editor"
+session_created=false
+
+exec tmux attach-session -t "$session"
