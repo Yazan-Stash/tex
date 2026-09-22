@@ -39,10 +39,26 @@ is_git_repository=false
 is_laravel_project=false
 has_pail=false
 has_horizon=false
+package_script=""
 
 if command -v git >/dev/null 2>&1 && git -C "$directory" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     is_git_repository=true
     required_commands+=(lazygit)
+fi
+
+if [[ -f "$directory/package.json" ]]; then
+    required_commands+=(node)
+
+    if command -v node >/dev/null 2>&1; then
+        if ! package_script="$(node -e 'const scripts = require(process.argv[1]).scripts ?? {}; if (Object.prototype.hasOwnProperty.call(scripts, "watch")) process.stdout.write("watch"); else if (Object.prototype.hasOwnProperty.call(scripts, "dev")) process.stdout.write("dev");' "$directory/package.json")"; then
+            echo "tex: unable to parse package.json." >&2
+            exit 1
+        fi
+
+        if [[ -n "$package_script" ]]; then
+            required_commands+=(npm)
+        fi
+    fi
 fi
 
 composer_has_package() {
@@ -95,6 +111,11 @@ tmux new-window -t "$session" -n "terminal" -c "$directory"
 if [[ "$is_git_repository" == true ]]; then
     tmux new-window -t "$session" -n "lazygit" -c "$directory"
     tmux send-keys -t "$session:lazygit" "lazygit" Enter
+fi
+
+if [[ -n "$package_script" ]]; then
+    tmux new-window -t "$session" -n "$package_script" -c "$directory"
+    tmux send-keys -t "$session:$package_script" "npm run $package_script" Enter
 fi
 
 if [[ "$is_laravel_project" == true ]]; then
