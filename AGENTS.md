@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`tex` is a small Bash command that creates or attaches to a tmux development session for the exact directory from which it is invoked. It is intended to be available globally through this symlink:
+`tex` is a small Go command that creates or attaches to a tmux development session for the exact directory from which it is invoked. `make build` compiles it to `./tex`, which is git-ignored and available globally through this symlink:
 
 ```text
 /usr/local/bin/tex -> /Users/yazanstash/personal/Code/tex/tex
@@ -17,9 +17,11 @@ tex        Create the current directory's session, or attach if it exists.
 tex stop   Stop the current directory's session.
 ```
 
-The project directory is the exact current working directory, not the Git root. The session name is the directory basename with tmux-special characters replaced by underscores. Basename collisions are accepted behavior.
+The project directory is the exact physical current working directory, not the Git root. The session name is the directory basename with every character other than letters, digits, `_` and `-` replaced by underscores. Basename collisions are accepted behavior.
 
-Attachment intentionally uses plain `tmux attach-session`. Do not switch clients or force nested tmux sessions. Running `tex` from inside tmux may therefore fail with tmux's normal nested-session warning.
+All tmux commands that target a session by name use the exact-match form `=name`. A bare name also matches by prefix, so `foo` would resolve to a running `foobar`.
+
+Attachment intentionally replaces the process with plain `tmux attach-session`. Do not switch clients or force nested tmux sessions. Running `tex` from inside tmux may therefore fail with tmux's normal nested-session warning.
 
 ## Project Layout File
 
@@ -55,45 +57,40 @@ Conditional windows are created in this order:
 | An `artisan` file exists without `laravel/pail` | `logs` | `tail -f storage/logs/laravel.log` |
 | An `artisan` file exists and `composer.json` declares `laravel/horizon` | `horizon` | `php artisan horizon` |
 
-`watch` always takes precedence over `dev`; never run both. Composer packages are detected in both `require` and `require-dev`.
+`watch` always takes precedence over `dev`; never run both. Composer packages are detected in both `require` and `require-dev`. Both files are parsed in Go, so detection needs neither `node` nor `php`. An invalid `package.json` is an error; an invalid `composer.json` declares no packages.
+
+## Code Layout
+
+| File | Responsibility |
+| --- | --- |
+| `main.go` | Arguments, session name, stop/attach/create flow, error output |
+| `texrc.go` | `.texrc` reading and parsing |
+| `layout.go` | Built-in layout detection and dependency checks |
+| `tmux.go` | All tmux calls |
+| `*_test.go` | Unit tests, plus `integration_test.go` against a real tmux server |
 
 ## Implementation Constraints
 
-- Keep the script compatible with Bash and retain `set -euo pipefail`.
-- Quote paths and tmux targets. Project directories may contain spaces or punctuation.
+- Use only the Go standard library. The binary must stay a single static file (`CGO_ENABLED=0`).
+- Never use a local Go toolchain. Build, vet and test only through `make`, which runs everything in Docker (see `Dockerfile`).
+- Keep error messages and stdout text exactly as documented here and in `.docs/texrc.md`. Errors print as `tex: <message>` and exit 1.
 - Validate applicable command dependencies of the built-in layout before creating a session.
-- Both the built-in layout and `.texrc` build the same ordered window list. A single loop creates the windows, targeting them by tmux window ID so names may contain spaces or dots, and sends commands with `send-keys -l`.
-- Keep the script compatible with macOS `/bin/bash` 3.2: no associative arrays, and never expand a possibly empty array under `set -u`.
-- Keep the failure trap that removes a partially constructed session.
-- Disable partial-session cleanup before the final attach so a non-interactive or nested attach failure does not destroy a successfully created session.
+- Both the built-in layout and `.texrc` build the same ordered `[]window`. One loop in `tmux.createSession` creates the windows, targeting them by tmux window ID so names may contain spaces or dots, and sends commands with `send-keys -l --`.
+- Remove a partially constructed session when creation fails. Never remove it after creation succeeds, so a non-interactive or nested attach failure leaves the session running.
 - Select the first window in the list before attachment (`editor` for the built-in layout).
-- Prefer small inline detection blocks. `.texrc` is the only configuration file; do not add others or additional runtime files.
+- Prefer small inline detection logic. `.texrc` is the only configuration file; do not add others or additional runtime files.
 - Do not modify or replace the `/usr/local/bin/tex` symlink unless the installation path changes explicitly.
 
 ## Verification
 
-There is no automated test suite. Every behavior change must be checked programmatically.
-
-At minimum, run the syntax check:
+Every behavior change needs an automated test. Run everything in Docker:
 
 ```bash
-bash -n tex
+make test    # gofmt check, go vet, unit tests, tmux integration tests (Linux)
+make build   # cross-compiles ./tex for the host OS and architecture
 ```
 
-For session behavior, use uniquely named temporary directories and invoke the installed `tex` command from each directory. In a non-interactive agent shell, the final attach is expected to report `open terminal failed: not a terminal`; the completed session should remain available for inspection.
-
-Inspect windows and commands with:
-
-```bash
-tmux list-windows -t SESSION -F '#{window_name}:#{pane_current_command}:#{pane_current_path}'
-tmux capture-pane -p -t SESSION:WINDOW
-```
-
-Always stop temporary sessions after verification:
-
-```bash
-tex stop
-```
+Integration tests build `tex`, run it in temporary directories against an isolated tmux server (`TMUX_TMPDIR`), and replace `vim`, `opencode`, `lazygit`, `npm`, `php` and `tail` with stubs that log their arguments. Add a case there for any change to session creation, detection, or `.texrc` handling.
 
 When changing detection logic, cover each affected branch, including precedence cases such as a `package.json` containing both `watch` and `dev`.
 
@@ -103,3 +100,11 @@ When changing `.texrc` handling, cover:
 - A `.texrc` inside a Git repository with `package.json` scripts. Only the file's windows should appear.
 - CRLF line endings and a missing trailing newline.
 - Each error case. Confirm exit status 1, the expected message, and that no session was created.
+
+After `make build`, smoke-test the real binary on the host. Use uniquely named temporary directories so no existing session is touched. In a non-interactive agent shell, the final attach is expected to report `open terminal failed: not a terminal`; the completed session should remain available for inspection:
+
+```bash
+tmux list-windows -t '=SESSION' -F '#{window_name}:#{window_active}:#{pane_current_command}'
+tmux capture-pane -p -t '=SESSION:WINDOW'
+tex stop
+```

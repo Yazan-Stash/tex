@@ -1,0 +1,2 @@
+# The source is mounted at run time, so the image needs no build context.
+*
